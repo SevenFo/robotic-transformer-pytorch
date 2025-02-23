@@ -182,6 +182,11 @@ def MBConv(
 
 
 class WindowAttention(Module):
+    """窗口注意力，类似于卷积操作，卷积核在输入特征图上滑动，这里相对应是“注意力核”在输入特征图上滑动
+    每个窗口的一个像素的所有通道作为一个token，flatten后作为一个token序列进行自注意力计算
+    注意位置编码是相对位置编码，和TransformerAttention不同
+    """
+
     def __init__(
         self,
         dim,  # 输入特征的维度
@@ -207,6 +212,7 @@ class WindowAttention(Module):
 
         # 可学习的记忆键值对（全局上下文记忆）
         # 第一个维度表示k,v，第二个维度表示头数，第三个维度表示记忆键值对的数量，第四个维度表示每个头的维度
+        # 相当于是额外的全局token，不由外部输入，而是随机生成的，并且由于参与了sim的计算，因此是可学习的
         self.mem_kv = nn.Parameter(torch.randn(2, self.heads, num_mem_kv, dim_head))
 
         self.attend = nn.Sequential(
@@ -287,27 +293,43 @@ class WindowAttention(Module):
         )
         num_mem = mk.shape[-2]
 
+        # concat memory token from previous time steps
         k = torch.cat((mk, k), dim=-2)  # 将记忆键值对和当前的键值对拼接
         v = torch.cat((mv, v), dim=-2)  # 将记忆键值对和当前的键值对拼接
 
         # sim
         # sim = Q/sqrt(d)*K^T -> b h i i+num_mem
+        # sim的第一行：
+        # abs pos 0,0->0,0, 0,0->0,1, 0,0->0,2, ..., 0,0->ws-1,ws-1, ..., 0,0->(ws-1,ws-1)+num_mem
+        # rel pos 0,0,      0,-1,     0,-2,     ..., -ws+1,-ws+1,    ..., -ws+1,-ws+1 (mem get 0,0)
+        # sim的第二行：
+        # abs pos 0,1->0,0, 0,1->0,1, 0,1->0,2, ..., 0,1->ws-1,ws-1, ..., 0,1->(ws-1,ws-1)+num_mem
+        # rel pos 0,1,      0,0,      0,-1,     ..., -ws+1,-ws,      ..., -ws+1,-ws, (mem get 0,0)
+        # ...
+        # sim的第ws*ws行：
+        # asb pos ws-1,ws-1->0,0, ws-1,ws-1->0,1, ..., ws-1,ws-1->ws-1,ws-1, ..., ws-1,ws-1->(ws-1,ws-1)+num_mem
+        # rel pos ws-1,ws-1, ws-1,ws-2, ..., ws-1,ws-1-ws+1, ..., ws-1,ws-1-ws+1 (mem get 0,0)
+        # 以上的位置关系就和self.rel_pos_indices对应上了
         sim = einsum("b h i d, b h j d -> b h i j", q, k)
 
         # add positional bias
-
+        # 取出每个sim对应的自注意力Q_K对的相对位置的偏置参数
+        # rel_pos_bias: (2*window_size-1)**2, h
+        # rel_pos_indices: window_size**2, window_size**2
+        # bias: window_size**2, window_size**2, h
         bias = self.rel_pos_bias(self.rel_pos_indices)
 
+        # pad the 2nd to the last dimension by (num_mem, 0)
         bias = F.pad(bias, (0, 0, num_mem, 0), value=0.0)
 
         sim = sim + rearrange(bias, "i j h -> h i j")
 
         # attention
 
-        attn = self.attend(sim)
+        attn = self.attend(sim)  # softmax last dim and dropout
 
         # aggregate
-
+        # out = attn * V
         out = einsum("b h i j, b h j d -> b h i d", attn, v)
 
         # merge heads
