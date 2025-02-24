@@ -141,7 +141,7 @@ class MBConvResidual(Module):
         return out + x
 
 
-class Dropc(Module):
+class Dropsample(Module):
     def __init__(self, prob=0):
         """用于drop 样本的模块，以概率prob丢弃输入的样本"""
         super().__init__()
@@ -824,15 +824,43 @@ class RT1(Module):
         )
 
         # 每个 frame 的所有 token (n个) 共享一个 time_step 的位置编码
+        # 其实有点想分组 transformer，每个 frame 的 token 作为一个 group
         learned_tokens = learned_tokens + repeat(
             pos_emb, "n d -> (n r) d", r=self.num_learned_tokens
         )
 
         # attention
-        # 输出为 b f n d
+        # 输入为 b f*n d
+        # 输出为 b f*n d
         attended_tokens = self.transformer(
             learned_tokens, cond_fns=transformer_cond_fns, attn_mask=~attn_mask
         )
+        # sim:
+        # - 0_0, 0_1, ..., 0_n
+        # - 1_0, 1_1, ..., 1_n
+        # - ...
+        # - n_0, n_1, ..., n_n
+        # casueal masked sim: 某个 token 只能跟它之前的 token 计算相似度
+        # - 0_0, 0,   ..., 0
+        # - 1_0, 1_1, ..., 0
+        # - ...
+        # - n_0, n_1, ..., n_n
+        # v:
+        # - s_0: [seq_00, seq_0c]
+        # - s_1: [seq_10, seq_1c]
+        # - ...
+        # - s_n: [seq_n0, seq_nc]
+        # out:
+        # - out[0,0] = 第一个 query token 和他之前的 key token 的相似度向量，
+        #              表示第一个 query token 和 key matrix 的相似度
+        #              * 每个 value token 的第一个维度（通道）组成的向量 = 第一个 query token 在 value matrix 的第一个通道上的加权效果
+        # - out[0,:] = 第一个 query token 在所有 value token 上的加权效果
+        # - ...
+        # - out[n,:] = 第 n 个 query token 在所有 value token 上的加权效果
+
+        # - out[0:frame_n,:] = 第一个 frame (time_step) 的所有 token (其实感觉可以将一个frame的所有token (8个) concat 起来为一个 token)
+        #                      -> action[0]
+        # - out[frame_n:frame_2n,:] = 第二个 frame 的所有 token -> action[1]
         # 将一个 frame 的所有 token (n个) 求均值，得到一个 frame 的 token
         pooled = reduce(attended_tokens, "b (f n) d -> b f d", "mean", f=frames)
         # output head, 最终输出 n_action 个 action_bins
