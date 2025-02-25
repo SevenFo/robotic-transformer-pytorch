@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# visualizations
+visualizations/
+
+# outputs
+outputs/

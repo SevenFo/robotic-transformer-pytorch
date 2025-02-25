@@ -366,8 +366,18 @@ class MaxViT(Module):
         mbconv_shrinkage_rate=0.25,
         dropout=0.1,
         channels=3,
+        width=224,
+        height=224,
     ):
         """输入为 b c h w，输出为 b num_classes"""
+
+        assert width % (window_size * 4) == 0, (
+            "width must be divisible by 4 * window_size"
+        )
+        assert height % (window_size * 4) == 0, (
+            "height must be divisible by 4 * window_size"
+        )
+
         super().__init__()
         assert isinstance(depth, tuple), (
             "depth needs to be tuple if integers indicating number of transformer blocks at that stage"
@@ -417,6 +427,7 @@ class MaxViT(Module):
                         expansion_rate=mbconv_expansion_rate,
                         shrinkage_rate=mbconv_shrinkage_rate,
                     ),
+                    # 此处的 w = original_w / 4, h = original_h / 4
                     # 这里的 WindowAttention 感受野在 block 内部
                     Rearrange(
                         "b d (x w1) (y w2) -> b x y w1 w2 d", w1=w, w2=w
@@ -471,7 +482,7 @@ class MaxViT(Module):
         cond_drop_prob=0.0,
         return_embeddings=False,
     ):
-        x = self.conv_stem(x)
+        x = self.conv_stem(x)  # b, c, h/2, w/2
 
         cond_fns = iter(default(cond_fns, []))
 
