@@ -3,7 +3,7 @@
 """
 
 import os
-from typing import Optional, Dict
+from typing import Optional, Dict, Union
 
 import lightning as lg
 import torch
@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from torchvision import transforms
+from einops import rearrange
 
 from robotic_transformer_pytorch import MaxViT, RT1
 from dataset import create_dataloader
@@ -35,10 +36,12 @@ class LitRT1(lg.LightningModule):
             dim=96,
             dim_head=32,
             depth=(2, 2, 5, 2),
-            window_size=8,  # 7
+            window_size=5,  # 7
             mbconv_expansion_rate=4,
             mbconv_shrinkage_rate=0.25,
             dropout=0.1,
+            width=640,
+            height=480,
         )
 
         # 创建 RT1 模型
@@ -59,6 +62,10 @@ class LitRT1(lg.LightningModule):
         )
 
     def forward(self, video, texts, text_embeds):
+        b, f, c, h, w = video.size()
+        assert f == 6, f"Expected 6 frames, got {f}"
+        assert c == 3, f"Expected 3 channels, got {c}"
+        video = rearrange(video, "b f c h w -> b c f h w")
         return self.model(video, texts=texts, text_embeds=text_embeds)
 
     def training_step(self, batch: Dict, batch_idx: int) -> torch.Tensor:
@@ -75,11 +82,11 @@ class LitRT1(lg.LightningModule):
         video = batch["video"]  # [B, T, C, H, W]
         action = batch["action"]  # [B, T, 13]
         texts = batch["language_raw"]  # List[str] of length B
-        texts_encoded = batch["language_use"]  # [B, 512]
-
+        texts_use = batch["language_use"]  # [B, 512]
+        texts_bert = batch["language_bert"]  # [B, 768]
         # 获取模型预测
         logits = self(
-            video, texts=None, text_embeds=texts_encoded
+            video, texts=None, text_embeds=texts_bert
         )  # [B, T, 13, action_bins]
 
         # 计算每个动作维度的交叉熵损失
@@ -147,7 +154,7 @@ def train(
     batch_size: int = 32,
     num_workers: int = 4,
     max_epochs: int = 100,
-    gpus: int = 1,
+    devices: list[int] | str | int = 1,
     resume_from_checkpoint: Optional[str] = None,
 ):
     # 设置输出目录
@@ -195,8 +202,8 @@ def train(
     # 创建训练器
     trainer = lg.Trainer(
         max_epochs=max_epochs,
-        accelerator="gpu" if gpus > 0 else "cpu",
-        devices=gpus,
+        accelerator="cpu" if devices == "cpu" else "gpu",
+        devices=devices,
         callbacks=callbacks,
         logger=logger,
         precision="16-mixed",  # 使用混合精度训练
@@ -212,16 +219,24 @@ def train(
 
 
 if __name__ == "__main__":
+    """
+    480,640,ws=5
+    672,448,ws=7
+    768,576,ws=6
+    """
+    import os
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
     set_log_level("INFO")
     torch.set_float32_matmul_precision("medium")
     # 训练配置
     config = {
         "data_dir": "/data/shared_folder/h5_ur_1rgb/raw_dataset",
         "output_dir": "./outputs",
-        "batch_size": 8,
+        "batch_size": 1,
         "num_workers": 4,
         "max_epochs": 100,
-        "gpus": 1,
+        "devices": 1,
         "resume_from_checkpoint": None,  # 或者指定检查点路径
     }
 

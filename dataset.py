@@ -194,7 +194,7 @@ class RobotMindDataset(Dataset):
         return {
             "video": video,
             "action": action,
-            "language_token": language_token,
+            "language_bert": language_token,
             "language_use": language_use,
             "language_raw": language_raw,
         }

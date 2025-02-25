@@ -160,6 +160,12 @@ class Dropsample(Module):
         return x * keep_mask / (1 - self.prob)
 
 
+class PrintShape(Module):
+    def forward(self, x):
+        print(x.shape)
+        return x
+
+
 def MBConv(
     dim_in, dim_out, *, downsample, expansion_rate=4, shrinkage_rate=0.25, dropout=0.0
 ):
@@ -371,6 +377,8 @@ class MaxViT(Module):
     ):
         """输入为 b c h w，输出为 b num_classes"""
 
+        self.width = width
+        self.height = height
         assert width % (window_size * 4) == 0, (
             "width must be divisible by 4 * window_size"
         )
