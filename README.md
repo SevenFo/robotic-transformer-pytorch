@@ -2,7 +2,7 @@
 
 ## Robotic Transformer - Pytorch
 
-Implementation of <a href="https://ai.googleblog.com/2022/12/rt-1-robotics-transformer-for-real.html">RT1 (Robotic Transformer)</a>, from the Robotics at Google team, in Pytorch
+Implementation of <a href="https://ai.googleblog.com/2022/12/rt-1-robotics-transformer-for-real.html">RT1 (Robotic Transformer)</a>, from the Robotics at Google team, in Pytorch. As well as the training script for the model.
 
 ## Install
 
@@ -53,15 +53,66 @@ eval_logits = model(video, instructions, cond_scale = 3.) # classifier free guid
 
 ```
 
-## Appreciation
+### Training
 
-- <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work and open source cutting edge artificial intelligence research
+To train the model, you can use the `train.py` script. Here is an example of how to run the training:
+
+```bash
+python train.py
+```
+
+You can also customize the training configuration by modifying the `config` dictionary in `train.py`.
+
+```python
+if __name__ == "__main__":
+    set_log_level("INFO")
+    torch.set_float32_matmul_precision("medium")
+    # 训练配置
+    config = {
+        "data_dir": "/data/shared_folder/h5_ur_1rgb/raw_dataset",
+        "output_dir": "./outputs",
+        "batch_size": 8,
+        "num_workers": 4,
+        "max_epochs": 100,
+        "gpus": 1,
+        "resume_from_checkpoint": None,  # 或者指定检查点路径
+    }
+
+    train(**config)
+```
+
+### Dataset
+
+The `dataset.py` script provides a `RobotMindDataset` class for loading and processing the `RoboMIND` dataset. Here is an example of how to use it:
+
+```python
+from dataset import create_dataloader
+
+data_dir = "/data/shared_folder/h5_ur_1rgb/raw_dataset"
+train_loader, val_loader = create_dataloader(
+    data_dir=data_dir,
+    split="merge",
+    window_size=6,
+    val_ratio=0.2,
+    batch_size=8,
+    num_workers=4,
+)
+
+for batch in train_loader:
+    print(batch)
+```
 
 
 ## Todo
 
-- [x] add classifier free guidance option
-- [x] add cross attention based conditioning
+- [ ] valuating the model trained by the `train.py` script
+
+
+
+## Appreciation
+
+- [lucidrains](https://github.com/lucidrains): for the implementation of the `RT1` model in Pytorch
+
 
 ## Citations
 
