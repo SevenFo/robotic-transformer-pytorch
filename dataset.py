@@ -5,6 +5,7 @@ import h5py
 import os
 import numpy as np
 import torchvision
+import tqdm
 from log import logger
 
 
@@ -61,8 +62,17 @@ class RobotMindDataset(Dataset):
         self.file_cache: Dict[str, h5py.File] = {}
         self.cache_size = file_cache_size
 
+        self.action_limits = {
+            "joint_position": np.array(
+                [[np.finfo(np.float64).max, np.finfo(np.float64).min]] * 7
+            ),
+            "end_effector": np.array(
+                [[np.finfo(np.float64).max, np.finfo(np.float64).min]] * 6
+            ),
+        }
+
         # 遍历目录收集数据
-        for dirpath, _, filenames in os.walk(dir):
+        for dirpath, _, filenames in tqdm.tqdm(os.walk(dir), desc="Indexing data"):
             for fname in filenames:
                 if not fname.endswith(".hdf5"):
                     continue
@@ -93,6 +103,26 @@ class RobotMindDataset(Dataset):
                 }
                 self._add_file_to_index(file_meta)
 
+    def _update_action_limits(
+        self, joint_position: np.ndarray, end_effector: np.ndarray
+    ):
+        joint_position_max = joint_position.max(axis=0)
+        joint_position_min = joint_position.min(axis=0)
+        end_effector_max = end_effector.max(axis=0)
+        end_effector_min = end_effector.min(axis=0)
+
+        # 更新关节位置限制
+        mask_min = joint_position_min < self.action_limits["joint_position"][:, 0]
+        mask_max = joint_position_max > self.action_limits["joint_position"][:, 1]
+        self.action_limits["joint_position"][mask_min, 0] = joint_position_min[mask_min]
+        self.action_limits["joint_position"][mask_max, 1] = joint_position_max[mask_max]
+
+        # 更新末端执行器限制
+        mask_min = end_effector_min < self.action_limits["end_effector"][:, 0]
+        mask_max = end_effector_max > self.action_limits["end_effector"][:, 1]
+        self.action_limits["end_effector"][mask_min, 0] = end_effector_min[mask_min]
+        self.action_limits["end_effector"][mask_max, 1] = end_effector_max[mask_max]
+
     def _add_file_to_index(self, file_meta: Dict):
         """将单个文件添加到索引系统"""
         file_path = file_meta["path"]
@@ -111,6 +141,10 @@ class RobotMindDataset(Dataset):
                 """
                 try:
                     traj_length = len(f["/observations/rgb_images/camera_top"])
+                    self._update_action_limits(
+                        np.array(f["/puppet/joint_position"]),
+                        np.array(f["/puppet/end_effector"]),
+                    )
                 except KeyError:
                     logger.warning(
                         f"Skipping {file_path}: missing /observations/rgb_images/camera_top \n Keys: {list_all_keys(f)}"
@@ -174,9 +208,9 @@ class RobotMindDataset(Dataset):
                     f"Invalid sample at index {idx}: Error decoding image of {file_path}"
                 )
         video = torch.stack(imgs)
-        # n_win, 6
+        # n_win, 6,  [x, y, z, r, p, y]
         end_effector = f["/puppet/end_effector"][window_start:window_end]
-        # n_win, 7
+        # n_win, 7, [base link, ..., end_effector link, gripper]
         joint_position = f["/puppet/joint_position"][window_start:window_end]
         action = np.concatenate([joint_position, end_effector], axis=1)
         # 1, 1, 768
@@ -210,6 +244,7 @@ def create_dataloader(
     val_ratio: float = 0.2,
     batch_size: int = 32,
     num_workers: int = 4,
+    seed: int = 42,
     **dataset_kwargs,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """
@@ -237,7 +272,7 @@ def create_dataloader(
         # 随机分割episode groups
         episodes = list(episode_indices.keys())
         # 设置随机种子以确保可重复性
-        generator = torch.Generator().manual_seed(42)
+        generator = torch.Generator().manual_seed(seed)
 
         # 计算训练集和验证集的episode数量
         num_val = int(len(episodes) * val_ratio)
@@ -389,6 +424,16 @@ if __name__ == "__main__":
     #     logger.error(f"加载单独的数据集失败: {type(e).__name__}: {e}")
 
     try:
+        from torchvision import transforms
+
+        transform = transforms.Compose(
+            [
+                transforms.ConvertImageDtype(torch.float32),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
         logger.info("测试 4: 正式数据集加载")
         train_loader, val_loader = create_dataloader(
             data_dir=data_path,
@@ -397,8 +442,8 @@ if __name__ == "__main__":
             val_ratio=0.2,
             batch_size=8,
             num_workers=4,
+            image_transform=transform,
         )
-
         logger.info(
             f"训练集大小: {len(train_loader.dataset)} 样本, {len(train_loader)} 批次"
         )
