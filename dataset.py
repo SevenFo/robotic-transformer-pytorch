@@ -8,6 +8,7 @@ import torchvision
 import tqdm
 from log import logger
 
+from data_utils import SampledDataset
 
 def list_all_keys(h5file, path="/"):
     """
@@ -245,6 +246,7 @@ def create_dataloader(
     batch_size: int = 32,
     num_workers: int = 4,
     seed: int = 42,
+    val_sample_size: Optional[int] = None,
     **dataset_kwargs,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
     """
@@ -299,23 +301,57 @@ def create_dataloader(
             shuffle=True,
             num_workers=num_workers,
         )
-        val_loader = DataLoader(
-            Subset(dataset, val_indices),
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-        )
+
+        if val_sample_size and val_sample_size < len(val_indices):
+            sampled_val_dataset = SampledDataset(
+                dataset=Subset(dataset, val_indices),
+                sample_size=val_sample_size,
+                seed=seed,
+            )
+            val_loader = DataLoader(
+                sampled_val_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+            )
+        else:
+            val_loader = DataLoader(
+                Subset(dataset, val_indices),
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+            )
         return train_loader, val_loader
-    else:
+    elif split == "train":
         # 直接使用原始划分
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=(split == "train"),  # 仅训练集shuffle
+            shuffle=True,  # 仅训练集shuffle
             num_workers=num_workers,
         )
         return loader, None
-
+    else:
+        if val_sample_size and val_sample_size < len(val_indices):
+            sampled_val_dataset = SampledDataset(
+                dataset=dataset,
+                sample_size=val_sample_size,
+                seed=seed,
+            )
+            val_loader = DataLoader(
+                sampled_val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+            )
+        else:
+            val_loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=False,  # 仅训练集shuffle
+                num_workers=num_workers,
+            )
+        return val_loader, None
 
 # 使用示例
 if __name__ == "__main__":

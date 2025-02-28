@@ -20,7 +20,7 @@ from config import load_config, get_default_config, save_config
 
 # 引入我们新创建的模块
 from callbacks import TrainingProgressCallback, EarlyStopping
-from data_utils import ValidationSampler, set_seed, get_train_val_loaders
+from data_utils import set_seed, get_train_val_loaders
 from lr_utils import get_cosine_schedule_with_warmup
 
 
@@ -63,8 +63,8 @@ class LitRT1(lg.LightningModule):
 
         # 损失函数权重
         self.action_weights = torch.tensor(
-            # 关节角度误差权重为1，末端执行器位姿误差权重为2
-            [1.0] * 7 + [2.0] * 6,
+            # 关节角度误差权重为1，末端执行器位姿误差权重为1
+            [1.0] * 7 + [1.0] * 6,
             device=self.device,
         )
 
@@ -83,12 +83,12 @@ class LitRT1(lg.LightningModule):
         current_lr = opt.param_groups[0]["lr"]
         logs["train/lr"] = current_lr
 
-        self.log_dict(logs, prog_bar=True, sync_dist=True, logger=True)
+        self.log_dict(logs, prog_bar=True, sync_dist=False, logger=True)
         return loss
 
     def validation_step(self, batch: Dict, batch_idx: int):
         loss, logs = self._shared_step(batch, "val")
-        self.log_dict(logs, prog_bar=True, sync_dist=True, logger=True)
+        self.log_dict(logs, prog_bar=True, sync_dist=False, logger=True)
         return loss
 
     def _shared_step(self, batch: Dict, mode: str) -> tuple[torch.Tensor, Dict]:
@@ -113,14 +113,13 @@ class LitRT1(lg.LightningModule):
 
         action_weights = self.action_weights.to(logits.device)
 
-        # 计算加权总损失
-        loss = (loss_per_dim * action_weights).mean()  # 加权后求平均
-
         # if loss.isnan():
         #     logger.error(f"Loss is NaN: {loss_per_dim=}, {action_weights=}")
 
         joint_loss = loss_per_dim[..., :7].mean()
         ee_loss = loss_per_dim[..., 7:].mean()
+        # 计算加权总损失
+        loss = joint_loss * 0.4 + ee_loss * 0.6
 
         # if joint_loss.isnan():
         #     logger.error(
@@ -251,8 +250,10 @@ def train(
     early_stopping: bool = True,  # 是否使用早停
     early_stopping_patience: int = 5,  # 早停耐心值
 ):
+    version = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     # 设置输出目录
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, version), exist_ok=True)
 
     # 设置随机种子
     set_seed(seed)
@@ -269,31 +270,22 @@ def train(
     train_loader, val_loader = create_dataloader(
         data_dir=data_dir,
         split="merge",
+        val_ratio=0.1,
         batch_size=batch_size,
         num_workers=num_workers,
         image_transform=transform,
         seed=seed,
+        val_sample_size=val_sample_size,  # 添加val_sample_size参数传递到数据加载器
+    )
+
+    logger.info(
+        f"成功加载数据集。训练集大小: {len(train_loader.dataset)}，"
+        f"验证集大小: {len(val_loader.dataset)} "
+        f"{'(已采样)' if val_sample_size and val_sample_size < len(val_loader.dataset.dataset) else ''}"
     )
 
     # 初始化回调列表
     callbacks = []
-
-    # 使用新创建的ValidationSampler替换原有代码
-    if val_sample_size and val_sample_size < len(val_loader.dataset):
-        logger.info(
-            f"将验证集采样到 {val_sample_size} 个样本（原始大小: {len(val_loader.dataset)}）"
-        )
-
-        val_sampler = ValidationSampler(
-            val_dataset=val_loader.dataset,
-            batch_size=batch_size,
-            sample_size=val_sample_size,
-            num_workers=num_workers,
-            seed=seed,
-        )
-
-        callbacks.append(val_sampler)
-        val_loader = val_sampler.initial_loader
 
     # 创建模型
     model = LitRT1(
@@ -306,9 +298,9 @@ def train(
 
     # 创建检查点回调
     checkpoint_callback = ModelCheckpoint(
-        dirpath=os.path.join(output_dir, "checkpoints"),
+        dirpath=os.path.join(output_dir, version, "checkpoints"),
         filename="rt1-{step:08d}-{val/loss:.4f}",
-        save_top_k=3,
+        save_top_k=10,
         monitor="val/loss",
         mode="min",
         save_last=True,
@@ -322,14 +314,14 @@ def train(
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     # 创建训练进度回调
-    progress_callback = TrainingProgressCallback(save_dir=output_dir)
+    # progress_callback = TrainingProgressCallback(save_dir=output_dir)
 
     # 添加基础回调
     callbacks.extend(
         [
             checkpoint_callback,
             lr_monitor,
-            progress_callback,
+            # progress_callback,
         ]
     )
 
@@ -345,7 +337,6 @@ def train(
         logger.info(f"启用早停，耐心值: {early_stopping_patience}")
 
     # 创建日志记录器
-    version = datetime.now().strftime("%Y%m%d_%H%M%S")
     tb_logger = TensorBoardLogger(
         output_dir, name="rt1", version=version, log_graph=True
     )
@@ -392,7 +383,7 @@ def train(
             "heads": 8,
         },
     }
-    save_config(config_to_save, os.path.join(output_dir, "config.yaml"))
+    save_config(config_to_save, os.path.join(output_dir, version, "config.yaml"))
 
     # 开始训练
     trainer.fit(
@@ -431,13 +422,15 @@ if __name__ == "__main__":
     config = get_default_config()
 
     # 可以在这里修改特定配置
-    # config.update(
-    #     {
-    #         "early_stopping": True,
-    #         "early_stopping_patience": 5,
-    #         "lr_scheduler_type": "cosine_warmup",  # 使用余弦预热调度器
-    #     }
-    # )
+    config.update(
+        {
+            "early_stopping": True,
+            "early_stopping_patience": 100,
+            "val_check_interval": 1000,
+            "val_sample_size": 700,
+            "save_checkpoint_steps": 10000,
+        }
+    )
 
     logger.info(f"Using config: {config}")
 

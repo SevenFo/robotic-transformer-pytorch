@@ -6,55 +6,73 @@ import torch
 import random
 import numpy as np
 from torch.utils.data import DataLoader, Subset, Dataset
-from typing import Callable, Optional
+from typing import Callable, Optional, List, Any
 from lightning.pytorch.callbacks import Callback
 
 
-class ValidationSampler(Callback):
+class SampledDataset(Dataset):
     """
-    验证集采样回调，每次验证时对验证集进行采样
+    动态采样数据集包装器
 
-    这可以加速验证过程，同时通过每次使用不同样本提供更全面的评估
+    每次遍历完子集后自动重新采样，可用于验证集加速
     """
 
     def __init__(
         self,
-        val_dataset: Dataset,
-        batch_size: int,
+        dataset: Dataset,
         sample_size: int,
-        num_workers: int = 4,
         seed: Optional[int] = None,
+        shuffle_after_epoch: bool = True,
     ):
-        super().__init__()
-        self.val_dataset = val_dataset
-        self.batch_size = batch_size
-        self.sample_size = min(sample_size, len(val_dataset))
-        self.num_workers = num_workers
-        self.seed = seed
+        """
+        初始化采样数据集
+
+        Args:
+            dataset: 原始数据集
+            sample_size: 采样大小，必须小于或等于原始数据集大小
+            seed: 随机种子，用于可复现性
+            shuffle_after_epoch: 是否在每次完整遍历后重新采样
+        """
+        self.dataset = dataset
+        self.sample_size = min(sample_size, len(dataset))
         self.random_gen = random.Random(seed) if seed is not None else random
-        self.initial_loader = self._create_loader()
+        self.shuffle_after_epoch = shuffle_after_epoch
+        self.full_indices = list(range(len(dataset)))
+        self.sampled_indices = self._sample_indices()
+        self.current_idx = 0
 
-    def _create_loader(self):
-        """创建采样后的验证数据加载器"""
-        indices = self.random_gen.sample(range(len(self.val_dataset)), self.sample_size)
-        sampled_dataset = Subset(self.val_dataset, indices)
-        return DataLoader(
-            sampled_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
+    def _sample_indices(self) -> List[int]:
+        """生成新的采样索引"""
+        return self.random_gen.sample(self.full_indices, self.sample_size)
 
-    def on_validation_epoch_start(self, trainer, pl_module):
-        """每次验证开始时重新采样验证集"""
-        trainer.val_dataloaders = self._create_loader()
+    def __len__(self) -> int:
+        """返回采样后的数据集大小"""
+        return self.sample_size
 
-    def on_validation_epoch_end(self, trainer, pl_module):
-        """验证结束后记录采样信息"""
-        trainer.logger.experiment.add_scalar(
-            "validation/sample_size", self.sample_size, trainer.global_step
-        )
+    def __getitem__(self, idx: int) -> Any:
+        """获取指定索引的样本"""
+
+        # 检查是否需要重新采样
+        if idx >= self.sample_size:
+            raise IndexError(
+                f"Index {idx} out of range for dataset with size {self.sample_size}"
+            )
+
+        # 获取当前样本
+        actual_idx = self.sampled_indices[idx]
+
+        self.current_idx += 1
+
+        if self.current_idx == self.sample_size:
+            # 遍历完一轮，重新采样
+            self.current_idx = 0
+            self.sampled_indices = self._sample_indices()
+
+        return self.dataset[actual_idx]
+
+    def resample(self) -> None:
+        """手动触发重新采样"""
+        self.sampled_indices = self._sample_indices()
 
 
 def set_seed(seed: int):
@@ -78,25 +96,26 @@ def get_train_val_loaders(dataset_fn, train_kwargs, val_kwargs, val_sample_size=
     Returns:
         train_loader: 训练数据加载器
         val_loader: 验证数据加载器
-        val_sampler: 验证采样器（如果适用）
     """
     train_dataset = dataset_fn(**train_kwargs)
     val_dataset = dataset_fn(**val_kwargs)
 
     train_loader = DataLoader(train_dataset, **train_kwargs.get("loader_args", {}))
 
-    val_sampler = None
+    # 如果指定了采样大小，使用SampledDataset包装验证集
     if val_sample_size and val_sample_size < len(val_dataset):
-        # 创建验证采样器
-        val_sampler = ValidationSampler(
-            val_dataset=val_dataset,
-            batch_size=val_kwargs.get("loader_args", {}).get("batch_size", 32),
+        sampled_val_dataset = SampledDataset(
+            dataset=val_dataset,
             sample_size=val_sample_size,
-            num_workers=val_kwargs.get("loader_args", {}).get("num_workers", 4),
             seed=val_kwargs.get("seed"),
         )
-        val_loader = val_sampler.initial_loader
+        val_loader = DataLoader(
+            sampled_val_dataset, **val_kwargs.get("loader_args", {})
+        )
     else:
         val_loader = DataLoader(val_dataset, **val_kwargs.get("loader_args", {}))
 
-    return train_loader, val_loader, val_sampler
+    return train_loader, val_loader
+
+
+# 可以移除原来的ValidationSampler类，因为它已经被SampledDataset替代
